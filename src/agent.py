@@ -78,16 +78,23 @@ You MUST respond with ONLY a JSON object in this exact format:
 }}
 
 ONLY output the JSON. No markdown, no explanation, no code blocks."""
+# This syntax is proper to anthropic not openai
+    #message = client.messages.create(
+        #model="gpt-4o-mini",
+        #max_tokens=1024,
+        #system=full_system,
+        #messages=[{"role": "user", "content": prompt}],
+    #)
 
-    message = client.messages.create(
+    #This is openai syntax
+    message = client.chat.completions.create(
         model="gpt-4o-mini",
         max_tokens=1024,
-        system=full_system,
-        messages=[{"role": "user", "content": prompt}],
-    )
+        messages=[{"role": "user", "content": prompt},
+                  {"role": "system", "content": full_system}],
+    )   
     
-    # ---------- Parse the response ----------
-    raw_text = message.content[0].text.strip()
+    raw_text = message.choices[0].message.content.strip()
     
     # Sometimes LLMs wrap in ```json ... ```. Strip it.
     if raw_text.startswith("```"):
