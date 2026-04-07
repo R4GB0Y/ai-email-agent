@@ -20,3 +20,7 @@ Thumbs.db
 
 # Docker
 *.log
+
+# Google token & credentials
+config/token.json
+config/credentials.json
