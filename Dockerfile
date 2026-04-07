@@ -23,7 +23,7 @@ COPY --from=builder /app/deps /app/deps
 # Set Python path to find our installed packages
 ENV PYTHONPATH="/app/deps:/app"
 # Don't buffer output — see logs in real time
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1  
 
 # Copy application code
 COPY src/ ./src/
@@ -34,5 +34,5 @@ HEALTHCHECK --interval=30s --timeout=3s \
     CMD python -c "print('healthy')" || exit 1
 
 # Run the agent
-CMD ["python", "-m", "src.agent"]
+CMD ["python", "-m", "src.server"]
 
