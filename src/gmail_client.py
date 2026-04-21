@@ -10,6 +10,7 @@ KEY CONCEPTS:
 """
 import os
 import base64
+from pathlib import Path
 from email.utils import parsedate_to_datetime
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -23,6 +24,29 @@ from config.settings import settings
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 TOKEN_PATH = "config/token.json"
+
+def _restore_token_from_env():
+    """
+    If GMAIL_TOKEN_B64 is set, decode it and write it to config/token.json.
+    This lets us ship the token into containerized environments (Railway, Docker)
+    without baking it into the image or committing it to git.
+
+    Called at module load. Idempotent — if the token already exists on disk,
+    it gets overwritten with the env var version (the env var is source of truth
+    in container environments).
+    """
+    token_b64 = os.environ.get("GMAIL_TOKEN_B64")
+    if not token_b64:
+        return  # No env var → assume local dev, use existing file if any
+
+    token_bytes = base64.b64decode(token_b64)
+    token_path = Path(TOKEN_PATH)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_bytes(token_bytes)
+
+
+# Call at module import time so the token is ready before anyone calls get_gmail_service
+_restore_token_from_env()
 
 
 def get_gmail_service():
