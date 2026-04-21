@@ -1,38 +1,45 @@
-# ---------- Stage 1: Build ----------
-# WHY multi-stage? Your final image doesn't need gcc, pip cache, etc.
-# Smaller image = faster deploys = lower costs.
-
+# ─────────────────────────────────────────────
+# Stage 1: builder
+# Install dependencies in an isolated layer so changes to src/ don't invalidate the dep cache.
+# ─────────────────────────────────────────────
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Copy requirements FIRST (before code)
-# WHY? Docker caches layers. If requirements.txt hasn't changed,
-# Docker reuses the cached pip install. Saves minutes on every build.
-COPY requirements.txt .
-RUN pip install --no-cache-dir --target=/app/deps -r requirements.txt
 
-# ---------- Stage 2: Runtime ----------
-FROM python:3.11-slim
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
+
+
+# ─────────────────────────────────────────────
+# Stage 2: runtime
+# ─────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /app/deps /app/deps
+# Copy installed packages from builder (avoids reinstalling in runtime layer)
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Set Python path to find our installed packages
-ENV PYTHONPATH="/app/deps:/app"
-# Don't buffer output — see logs in real time
-ENV PYTHONUNBUFFERED=1  
+# Copy source code
+COPY src/       ./src/
+COPY config/    ./config/
 
-# Copy application code
-COPY src/ ./src/
-COPY config/ ./config/
+# Removed this copy tests file because in prod good practices the tests are prohibited by .dockerignore file, because tests are not needed in production.
+# COPY tests/     ./tests/
 
-# Health check — so orchestrators know if we're alive
-HEALTHCHECK --interval=30s --timeout=3s \
-    CMD python -c "print('healthy')" || exit 1
+# Non-root user — production best practice
+RUN useradd --create-home appuser \
+ && chown -R appuser:appuser /app
+USER appuser
 
-# Run the agent
-CMD ["python", "-m", "src.server"]
+# Default: run the pipeline scheduler.
+# Override with RUN_MODE=server to start the HTTP API instead.
+ENV RUN_MODE=pipeline
+ENV PYTHONUNBUFFERED=1
 
+CMD ["sh", "-c", \
+     "if [ \"$RUN_MODE\" = 'server' ]; then python -m src.server; \
+      else python -m src.pipeline; fi"]

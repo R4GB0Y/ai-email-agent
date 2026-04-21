@@ -14,13 +14,16 @@ class Settings:
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     GMAIL_CREDENTIALS_PATH: str = os.getenv("GMAIL_CREDENTIALS_PATH", "config/credentials.json")
+    SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
     
     # Fail fast if critical keys are missing
     @classmethod
-    def validate(cls):
-        missing = []
-        if not cls.OPENAI_API_KEY:
-            missing.append("OPENAI_API_KEY")
+    def validate(cls,require: list[str]) -> None:
+        """
+        Check that the specified env vars are set.
+        Each module passes only the keys it actually needs.
+        """
+        missing = [key for key in require if not getattr(cls, key, None)]
         if missing:
             raise EnvironmentError(
                 f"Missing required env vars: {', '.join(missing)}. "
