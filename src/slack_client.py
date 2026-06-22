@@ -21,11 +21,13 @@ from typing import Optional
 
 import urllib.request
 import urllib.error
+import structlog
 
 from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
+    retry_if_exception_type,
     before_sleep_log,
 )
 
@@ -33,10 +35,14 @@ from config.settings import Settings
 from src.classifier import ClassifiedEmail, EmailCategory, EmailPriority
 from src.draft_generator import DraftResponse
 
-logger = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
+_stdlib_log = logging.getLogger(__name__)
 
 settings = Settings()
 settings.validate(require=["SLACK_WEBHOOK_URL"])
+
+class _TransientSlackError(Exception):
+    """Raised for retryable Slack failures so tenacity can latch onto a single type."""
 
 
 # ─────────────────────────────────────────────
@@ -152,6 +158,7 @@ def _build_email_blocks(
 def build_digest_message(
     emails: list[dict],
     run_label: str = "Email Digest",
+    summary: Optional[dict] = None,
 ) -> dict:
     """
     Build a complete Slack message payload for a batch of classified emails.
@@ -186,18 +193,21 @@ def build_digest_message(
         and e["classification"].requires_reply
     )
 
-    blocks: list[dict] = [
+    if summary is not None:
+        count_text = (
+            f"*{summary.get('surfaced', 0)} surfaced* · "
+            f"{summary.get('filtered', 0)} filtered out · "
+            f"{summary.get('fetched', 0)} fetched · "
+            f"{action_count} need a reply"
+        )
+    else:
+        count_text = (
+            f"*{len(emails)} emails* to review · "
+            f"*{action_count}* require a reply"
+        )
+    blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": f":inbox_tray: {run_label}"}},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"*{len(emails)} emails* to review · "
-                    f"*{action_count}* require a reply"
-                ),
-            },
-        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": count_text}},
         {"type": "divider"},
     ]
 
@@ -213,7 +223,7 @@ def build_digest_message(
         draft: Optional[DraftResponse]            = email.get("draft")
 
         if classification is None:
-            logger.warning("Email missing classification in build_digest_message: %r", email.get("subject"))
+            log.warning("digest.email_missing_classification", subject=email.get("subject"))
             continue
 
         email_blocks = _build_email_blocks(email, classification, draft)
@@ -240,9 +250,10 @@ class SlackWebhookError(Exception):
 
 
 @retry(
-    wait=wait_exponential(multiplier=1, min=2, max=30),
-    stop=stop_after_attempt(3),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=1, max=16),
+    retry=retry_if_exception_type(_TransientSlackError),
+    before_sleep=before_sleep_log(_stdlib_log, logging.WARNING),
     reraise=True,
 )
 def _post_to_webhook(payload: dict, webhook_url: str) -> None:
@@ -260,29 +271,29 @@ def _post_to_webhook(payload: dict, webhook_url: str) -> None:
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            body = response.read().decode("utf-8")
-            if body != "ok":
-                raise SlackWebhookError(f"Slack webhook returned unexpected body: {body!r}")
-            logger.info("Slack message posted successfully")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status >= 300:
+                raise _TransientSlackError(f"unexpected status {resp.status}")
 
     except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        if e.code == 429:
-            retry_after = int(e.headers.get("Retry-After", 5))
-            logger.warning("Slack rate-limited. Sleeping %ds.", retry_after)
-            time.sleep(retry_after)
-        raise SlackWebhookError(f"Slack webhook HTTP {e.code}: {error_body}") from e
+        if e.code == 429 or 500 <= e.code < 600:
+            # 429 = rate limit, transient. 5xx = server problem, transient.
+            raise _TransientSlackError(f"HTTP {e.code}") from e
+        log.error("slack.post.bad_request", status=e.code, body=e.read()[:500])
+        raise 
 
     except urllib.error.URLError as e:
-        raise SlackWebhookError(f"Slack webhook network error: {e.reason}") from e
+        # DNS failure, connection refused, timeout — almost always transient.
+        raise _TransientSlackError(str(e)) from e
 
 
 def send_digest_to_slack(
     emails: list[dict],
     run_label: str = "Email Digest",
     webhook_url: Optional[str] = None,
+    summary: Optional[dict] = None,   # ← new
 ) -> bool:
+
     """
     Build and send a digest message to Slack.
 
@@ -296,13 +307,13 @@ def send_digest_to_slack(
     """
     url = webhook_url or settings.SLACK_WEBHOOK_URL
 
-    payload = build_digest_message(emails, run_label=run_label)
+    payload = build_digest_message(emails, run_label=run_label, summary=summary)
 
-    logger.debug("Sending %d-block Slack message", len(payload.get("blocks", [])))
+    log.debug("slack.payload.prepared", block_count=len(payload.get("blocks", [])))
 
     try:
         _post_to_webhook(payload, url)
         return True
     except SlackWebhookError:
-        logger.exception("Failed to send Slack digest after retries")
+        log.exception("slack.digest.failed_after_retries")
         return False
