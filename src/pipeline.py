@@ -209,6 +209,16 @@ def _record_run(summary: dict, status: str) -> None:
         _last_run["finished_at"] = time.time()
 
 
+def _scheduled_job() -> None:
+    try:
+        summary = run_pipeline()
+        status = "ok" if summary.get("sent") else "degraded"
+        _record_run(summary, status)
+    except Exception:
+        log.exception("pipeline.crashed")
+        _record_run({}, "crashed")
+
+
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path not in ("/health", "/"):
@@ -255,10 +265,16 @@ def start_scheduler(interval_hours: float = SCHEDULE_HOURS) -> None:
     WHY BlockingScheduler: it blocks the main thread, keeping the process alive.
     IntervalTrigger: runs immediately on start, then every `interval_hours`.
     """
+    # 1. Start health server first
+    port = int(os.getenv("PORT", "8080"))
+    _start_health_server(port)
+    log.info("health_server.started", port=port)
+
+    # 2. Start scheduler
     scheduler = BlockingScheduler(timezone="UTC")
 
     scheduler.add_job(
-        func=run_pipeline,
+        func=_scheduled_job,
         trigger=IntervalTrigger(hours=interval_hours),
         id="email_pipeline",
         name="Email agent pipeline",
@@ -272,7 +288,7 @@ def start_scheduler(interval_hours: float = SCHEDULE_HOURS) -> None:
     try:
         # Run immediately before handing off to scheduler
         log.info("scheduler.run_immediate")
-        run_pipeline()
+        _scheduled_job()
 
         scheduler.start()
 
