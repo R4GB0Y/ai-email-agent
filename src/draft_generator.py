@@ -25,15 +25,14 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log,
 )
-
-from config.settings import Settings
 from src.classifier import ClassifiedEmail, EmailCategory
+from config.settings import get_config
 
 logger = logging.getLogger(__name__)
 
-settings = Settings()
-settings.validate(require=["OPENAI_API_KEY"])
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+# returns the shared singleton
+cfg = get_config()                          
+client = OpenAI(api_key=cfg.openai_api_key)
 
 
 # ─────────────────────────────────────────────

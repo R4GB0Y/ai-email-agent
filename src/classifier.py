@@ -21,15 +21,12 @@ from tenacity import (
     before_sleep_log,
 )
 
-from config.settings import Settings
+from config.settings import get_config 
+
+cfg = get_config()
+client = OpenAI(api_key=cfg.openai_api_key)
 
 logger = logging.getLogger(__name__)
-
-settings = Settings()
-settings.validate(require=["OPENAI_API_KEY"])
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
-
-
 # ─────────────────────────────────────────────
 # Domain model
 # ─────────────────────────────────────────────

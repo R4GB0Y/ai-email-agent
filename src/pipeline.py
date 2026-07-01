@@ -26,9 +26,9 @@ from typing import Optional
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from config.settings import Settings
+from config.settings import get_config 
 from src.gmail_client import fetch_unread_emails
-from src.classifier import classify_emails_batch
+from src.classifier import classify_emails_batch, EmailPriority, EmailCategory
 from src.draft_generator import generate_drafts_for_batch, DraftTone
 from src.slack_client import send_digest_to_slack
 import structlog
@@ -39,6 +39,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
+
 
 # ─────────────────────────────────────────────
 # Logging setup
@@ -55,8 +56,8 @@ import os
  #       )
 configure_logging()
 log = structlog.get_logger(__name__)
-settings = Settings()
-settings.validate(require=["OPENAI_API_KEY", "SLACK_WEBHOOK_URL"])
+
+cfg = get_config()
 
 
 # ─────────────────────────────────────────────
@@ -66,9 +67,9 @@ settings.validate(require=["OPENAI_API_KEY", "SLACK_WEBHOOK_URL"])
 # ─────────────────────────────────────────────
 
 SKIP_CATEGORIES    = {"spam", "newsletter", "receipt"}  # Not worth surfacing
-DRAFT_TONE         = DraftTone.FORMAL
-MAX_EMAILS_PER_RUN = 20   # Safety cap — prevents a flooded inbox from sending 100 Slack blocks
-SCHEDULE_HOURS     = 6    # How often the pipeline runs
+DRAFT_TONE         = DraftTone(cfg.response_tone)
+MAX_EMAILS_PER_RUN = cfg.max_emails_per_run # Safety cap — prevents a flooded inbox from sending 100 Slack blocks
+SCHEDULE_HOURS     = 6*60  # How often the pipeline runs  matching it with the schedule_interval_minutes in the settings.py file
 
 
 
@@ -131,7 +132,7 @@ def run_pipeline(run_label: Optional[str] = None) -> dict:
             classified_emails = classify_emails_batch(emails, skip_categories=SKIP_CATEGORIES)
             summary["processed"] = len(classified_emails)   # everything the LLM processed 
             log.info("stage.classify.ok", processed=len(classified_emails))
-            surfaced = [e for e in classified_emails if e["classification"].priority != "low"]
+            surfaced = [e for e in classified_emails if e["classification"].priority != EmailPriority.LOW] # filter out low priority emails used to be if e["classification"].priority != "low" and fixed it to direct use of enum because it's stronger and more readable, and even in case of change of the class EmailPriority from (str,enum) to (enum) it won't break.
             summary["surfaced"] = len(surfaced)
             summary["filtered"] = summary["processed"] - summary["surfaced"] # for readability
             log.info("stage.filter.ok", surfaced=summary["surfaced"], filtered=summary["filtered"])
@@ -258,7 +259,7 @@ def _start_health_server(port: int) -> None:
 # Scheduler
 # ─────────────────────────────────────────────
 
-def start_scheduler(interval_hours: float = SCHEDULE_HOURS) -> None:
+def start_scheduler() -> None:
     """
     Start APScheduler and run the pipeline on a fixed interval.
 
@@ -275,7 +276,7 @@ def start_scheduler(interval_hours: float = SCHEDULE_HOURS) -> None:
 
     scheduler.add_job(
         func=_scheduled_job,
-        trigger=IntervalTrigger(hours=interval_hours),
+        trigger=IntervalTrigger(minutes=cfg.schedule_interval_minutes),
         id="email_pipeline",
         name="Email agent pipeline",
         replace_existing=True,
@@ -283,7 +284,7 @@ def start_scheduler(interval_hours: float = SCHEDULE_HOURS) -> None:
         misfire_grace_time=300, # WHY: if a run is missed (sleep, restart), allow 5 min catchup
     )
 
-    log.info("scheduler.starting", interval_hours=interval_hours)
+    log.info("scheduler.starting", interval_minutes=cfg.schedule_interval_minutes)
 
     try:
         # Run immediately before handing off to scheduler
@@ -322,7 +323,7 @@ def main() -> None:
         summary = run_pipeline()
         sys.exit(0 if not summary["errors"] else 1)
     else:
-        start_scheduler(interval_hours=args.interval_hours)
+        start_scheduler()
 
 
 if __name__ == "__main__":
